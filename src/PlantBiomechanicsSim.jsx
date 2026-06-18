@@ -195,7 +195,7 @@ function simulateStep(vertices, edges, boundaryEdgeIndices, pressure, externalFo
     cgState.isFirstStep = true;
   }
 
-  const cgIterations = 6;
+  const cgIterations = 2;
 
   for (let iter = 0; iter < cgIterations; iter++) {
     computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalForces, cgState.currentForces);
@@ -311,10 +311,12 @@ function triFillColor(edges,tri){
 }
 
 function anisoColor(angle, ratio) {
-  const hue = ((angle % Math.PI) / Math.PI * 360 + 360) % 360;
-  const sat = Math.round(Math.min(Math.abs(1 - ratio) / 2, 1) * 90);
-  const lig = 45;
-  return `hsl(${Math.round(hue)},${sat}%,${lig}%)`;
+  //const hue = ((angle % Math.PI) / Math.PI * 360 + 360) % 360;
+ // const sat = Math.round(Math.min(Math.abs(1 - ratio) / 2, 1) * 90);
+  //const lig = 45;
+  const [r,g,b]=viridis(Math.min(1-ratio,1))
+return `rgba(${r},${g},${b},${0.6})`;
+
 }
 
 const CANVAS_W=700,CANVAS_H=500;
@@ -324,17 +326,17 @@ const PRESETS=[
   {label:"Hexagon",fn:()=>makeHex(350,250,110)},
   {label:"Circle",fn:()=>makeCircle(350,250,110,20)},
   {label:"Leaf",fn:()=>makeLeaf(350,250,220)},
-  {label:"Bilayer Strip",fn:()=>makeStrip(350,250,400,70,16),
-    postProcess:(verts,eds)=>{
-      let minY=Infinity,maxY=-Infinity,minX=Infinity;
-      for(const v of verts){if(v.y<minY)minY=v.y;if(v.y>maxY)maxY=v.y;if(v.x<minX)minX=v.x;}
-      const midY=(minY+maxY)/2;
-      return {
-        edges:eds.map(ed=>({...ed,stiffness:(verts[ed.i].y+verts[ed.j].y)/2<midY?2.5:0.3})),
-        vertices:verts.map(v=>({...v,pinned:v.x<minX+5})),
-      };
-    }
-  },
+  //{label:"Bilayer Strip",fn:()=>makeStrip(350,250,400,70,16), /old bilayer
+   // postProcess:(verts,eds)=>{
+    //  let minY=Infinity,maxY=-Infinity,minX=Infinity;
+    //  for(const v of verts){if(v.y<minY)minY=v.y;if(v.y>maxY)maxY=v.y;if(v.x<minX)minX=v.x;}
+    //  const midY=(minY+maxY)/2;
+    //  return {
+    //    edges:eds.map(ed=>({...ed,stiffness:(verts[ed.i].y+verts[ed.j].y)/2<midY?2.5:0.3})),
+    //    vertices:verts.map(v=>({...v,pinned:v.x<minX+5})),
+    //  };
+    //}
+ // },
 ];
 const OVERLAY_MODES={NONE:"none",STRESS:"stress",DISP:"disp",ARROWS:"arrows"};
 
@@ -673,7 +675,7 @@ export default function PlantBiomechanicsSim() {
               <div style={headingStyle}>🌿 Paint Stiffness</div>
               <label style={labelStyle}>Stiffness: <span style={{...strongVal,color:stiffnessLabelColor(brushStiffness)}}>{brushStiffness.toFixed(1)}</span></label>
               <input type="range" min="0.1" max="3" step="0.1" value={brushStiffness} onChange={e=>setBrushStiffness(parseFloat(e.target.value))} style={sliderStyle}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim}}><span style={{color: '#440154'}}>Soft</span><span style={{color: '#fde725'}}>Stiff</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim}}><span style={{color: '#ffffff'}}>Soft</span><span style={{color: '#ffffff'}}>Stiff</span></div>
               <label style={{...labelStyle,marginTop:"12px"}}>Brush radius: <span style={strongVal}>{brushRadius}px</span></label>
               <input type="range" min="15" max="150" step="5" value={brushRadius} onChange={e=>setBrushRadius(parseInt(e.target.value))} style={sliderStyle}/>
               <button onClick={()=>setAllStiffness(brushStiffness)} style={{...smallBtn,width:"100%",marginTop:"10px"}}>Set All to {brushStiffness.toFixed(1)}</button>
@@ -704,7 +706,7 @@ export default function PlantBiomechanicsSim() {
                   {(() => {
                     const ar=anisoAngle*Math.PI/180;
                     const px=Math.cos(ar)*25,py=Math.sin(ar)*25;
-                    const col=anisoColor(ar,anisoRatio);
+                    const col=anisoColor(1,anisoRatio); // can set the first colour to be ar if want it to change with angles
                     return <>
                       <line x1={-px} y1={-py} x2={px} y2={py} stroke={col} strokeWidth="2.5" strokeLinecap="round"/>
                       <circle r="3" fill={col}/>
@@ -815,7 +817,11 @@ export default function PlantBiomechanicsSim() {
               </div>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"10px"}}><span>Soft</span><span>Stiff</span></div>
               <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}>Vectors — anisotropy direction</div>
-              <div style={{color:COL.textMuted,fontSize:"11px"}}>Vector length ∝ grid sizing</div>
+               <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}>Vectors — Anisotropy degree</div>
+              <div style={{display:"flex",height:"10px",borderRadius:"3px",overflow:"hidden",marginBottom:"3px"}}>
+                {Array.from({length:16},(_,i)=>{const [r,g,b]=viridis(i/15);return <div key={i} style={{flex:1,background:`rgb(${r},${g},${b})`}}/>;})}
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"10px"}}><span>Isotropic</span><span>Anisotropic</span></div>
             </>):(!isSimMode||overlayMode===OVERLAY_MODES.NONE)?(<>
               <div style={{display:"flex",height:"10px",borderRadius:"3px",overflow:"hidden",marginBottom:"3px"}}>
                 {Array.from({length:16},(_,i)=>{const [r,g,b]=viridis(i/15);return <div key={i} style={{flex:1,background:`rgb(${r},${g},${b})`}}/>;})}
