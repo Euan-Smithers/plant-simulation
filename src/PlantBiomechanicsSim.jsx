@@ -628,7 +628,7 @@ export default function PlantBiomechanicsSim() {
 
       <div style={{textAlign:"center",marginBottom:"14px"}}>
         <h1 style={{fontSize:"24px",fontWeight:700,color:"#fff",margin:"0 0 4px 0",letterSpacing:"-0.5px"}}>
-          🌱 Plant Cell Biomechanics Lab (CG Solver)
+          🌱 Plant Cell Biomechanics Lab
         </h1>
         <p style={{fontSize:"14px",color:COL.textMuted,margin:0}}>
           Draw · Paint stiffness & anisotropy · Apply turgor pressure · Visualise static stress fields via Conjugate Gradient
