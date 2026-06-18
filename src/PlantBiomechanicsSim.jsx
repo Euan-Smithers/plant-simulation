@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 
 function dist(a, b) { return Math.sqrt((a.x-b.x)**2+(a.y-b.y)**2); }
 function computeCentroid(verts) {
-  let cx=0,cy=0; for(const v of verts){cx+=v.x;cy+=v.y;}
+  let cx=0,cy=0; for(let i=0; i<verts.length; i++){cx+=verts[i].x;cy+=verts[i].y;}
   return {x:cx/verts.length,y:cy/verts.length};
 }
 function pointInPolygon(px,py,poly) {
@@ -63,7 +63,7 @@ function generateInteriorPoints(boundary, spacing=22) {
       const ox=((Math.round((y-minY)/spacing))%2)*spacing*0.5,px=x+ox;
       if(pointInPolygon(px,y,boundary)){
         let tooClose=false;
-        for(const bv of boundary){if(dist({x:px,y},bv)<spacing*0.45){tooClose=true;break;}}
+        for(let i=0; i<boundary.length; i++){if(dist({x:px,y},boundary[i])<spacing*0.45){tooClose=true;break;}}
         if(!tooClose) pts.push({x:px,y});
       }
     }
@@ -78,21 +78,25 @@ function buildMesh(boundaryPts, subdivisionMaxEdge=0) {
   const allPts=[...boundaryPts,...interior];
   const verts=allPts.map((p,i)=>({x:p.x,y:p.y,vx:0,vy:0,pinned:false,isBoundary:i<nBoundary}));
   const triangles=delaunayTriangulate(allPts);
+  
   const goodTris=triangles.filter(t=>{
+    const boundaryVerticesCount = (t.a < nBoundary ? 1 : 0) + (t.b < nBoundary ? 1 : 0) + (t.c < nBoundary ? 1 : 0);
+    if (boundaryVerticesCount > 0 && boundaryVerticesCount < 3) return true;
     const cx=(allPts[t.a].x+allPts[t.b].x+allPts[t.c].x)/3;
     const cy=(allPts[t.a].y+allPts[t.b].y+allPts[t.c].y)/3;
     return pointInPolygon(cx,cy,boundaryPts);
   });
+
   const edgeSet=new Set(),ek=(a,b)=>a<b?`${a}-${b}`:`${b}-${a}`,edges=[];
   const boundaryEdgeKeys=new Set();
   for(let i=0;i<nBoundary;i++) boundaryEdgeKeys.add(ek(i,(i+1)%nBoundary));
   const isBoundaryEdge=(a,b)=>a<nBoundary&&b<nBoundary&&boundaryEdgeKeys.has(ek(a,b));
-  for(const t of goodTris){
+  for(let i=0; i<goodTris.length; i++){
+    const t=goodTris[i];
     for(const [a,b] of [[t.a,t.b],[t.b,t.c],[t.c,t.a]]){
       const k=ek(a,b);
       if(!edgeSet.has(k)){
         edgeSet.add(k);
-        // aniso: angle=0 (horizontal preferred), ratio=1 (isotropic by default)
         edges.push({i:a,j:b,stiffness:1.0,restLength:dist(allPts[a],allPts[b]),
           isBoundary:isBoundaryEdge(a,b),aniso:{angle:0,ratio:1.0}});
       }
@@ -109,9 +113,6 @@ function buildMesh(boundaryPts, subdivisionMaxEdge=0) {
   return {vertices:verts,edges,triangles:goodTris,nBoundary};
 }
 
-// Compute effective stiffness for an edge given its current geometry and anisotropy params.
-// ratio = k_perp / k_parallel. When ratio=1 => isotropic.
-// We project edge unit vector onto preferred axis; blend stiffness accordingly.
 function effectiveStiffness(edge, ax, ay) {
   const {stiffness, aniso} = edge;
   if(!aniso || aniso.ratio===1.0) return stiffness;
@@ -119,77 +120,128 @@ function effectiveStiffness(edge, ax, ay) {
   const edLen = Math.sqrt(ax*ax+ay*ay)||1;
   const ex=ax/edLen, ey=ay/edLen;
   const px=Math.cos(angle), py=Math.sin(angle);
-  const dot=ex*px+ey*py; // cos(theta) between edge and preferred axis
-  const cos2=dot*dot;    // projection^2 onto preferred axis
-  // interpolate: along preferred axis = stiffness, perpendicular = stiffness*ratio
+  const dot=ex*px+ey*py;
+  const cos2=dot*dot;
   return stiffness*(cos2 + ratio*(1-cos2));
 }
 
-function simulateStep(vertices,edges,boundaryEdgeIndices,pressure,externalForces,dt=0.25,damping=0.88) {
-  const subSteps=16;
-  const subDt=dt/subSteps;
-  let verts=vertices.map(v=>({...v}));
-  let lastForces=null;
-  for(let s=0;s<subSteps;s++){
-    const n=verts.length,forces=verts.map(()=>({x:0,y:0}));
-    for(const edge of edges){
-      const a=verts[edge.i],b=verts[edge.j];
-      const dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||0.001;
-      const eff=effectiveStiffness(edge,dx,dy);
-      const strain=(d-edge.restLength)/(edge.restLength||0.001),fm=eff*strain*d;
-      const fx=(fm*dx)/d,fy=(fm*dy)/d;
-      forces[edge.i].x+=fx;forces[edge.i].y+=fy;forces[edge.j].x-=fx;forces[edge.j].y-=fy;
-    }
-    if(Math.abs(pressure)>0.001){
-      const bVerts=verts.filter(v=>v.isBoundary);
-      const centroid=computeCentroid(bVerts.length>0?bVerts:verts);
-      for(const ei of boundaryEdgeIndices){
-        const edge=edges[ei],a=verts[edge.i],b=verts[edge.j];
-        const mx=(a.x+b.x)/2,my=(a.y+b.y)/2,edx=b.x-a.x,edy=b.y-a.y;
-        const len=Math.sqrt(edx*edx+edy*edy)||0.001;
-        let nx=-edy/len,ny=edx/len;
-        if(nx*(centroid.x-mx)+ny*(centroid.y-my)>0){nx=-nx;ny=-ny;}
-        const pf=pressure*len*0.5;
-        forces[edge.i].x+=nx*pf;forces[edge.i].y+=ny*pf;forces[edge.j].x+=nx*pf;forces[edge.j].y+=ny*pf;
-      }
-    }
-    for(const ef of externalForces){if(ef.vertexIndex<n){forces[ef.vertexIndex].x+=ef.fx;forces[ef.vertexIndex].y+=ef.fy;}}
-    const newVerts=verts.map((v,i)=>{
-      if(v.pinned) return {...v,vx:0,vy:0};
-      const vx=((v.vx||0)+forces[i].x*subDt)*damping;
-      const vy=((v.vy||0)+forces[i].y*subDt)*damping;
-      return {...v,x:v.x+vx*subDt,y:v.y+vy*subDt,vx,vy};
-    });
-    const freeFree=newVerts.filter(v=>!v.pinned);
-    if(freeFree.length>0){
-      const mvx=freeFree.reduce((s,v)=>s+v.vx,0)/freeFree.length;
-      const mvy=freeFree.reduce((s,v)=>s+v.vy,0)/freeFree.length;
-      for(const v of newVerts){if(!v.pinned){v.vx-=mvx;v.vy-=mvy;}}
-    }
-    if(freeFree.length>0){
-      const cx=freeFree.reduce((s,v)=>s+v.x,0)/freeFree.length;
-      const cy=freeFree.reduce((s,v)=>s+v.y,0)/freeFree.length;
-      let L=0,I=0;
-      for(const v of newVerts){
-        if(v.pinned) continue;
-        const rx=v.x-cx,ry=v.y-cy;
-        L+=rx*v.vy-ry*v.vx; I+=rx*rx+ry*ry;
-      }
-      if(I>0.001){
-        const omega=L/I;
-        for(const v of newVerts){if(!v.pinned){v.vx+=omega*(v.y-cy);v.vy-=omega*(v.x-cx);}}
-      }
-    }
-    verts=newVerts;
-    if(s===subSteps-1) lastForces=forces;
+// Zero-allocation function. Mutates 'forces' in-place.
+function computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalForces, forces) {
+  const n = verts.length;
+  for (let i = 0; i < n; i++) {
+    forces[i].x = 0; forces[i].y = 0;
   }
-  let sumSq=0,cnt=0;
-  for(let i=0;i<verts.length;i++){
-    if(verts[i].pinned) continue;
-    sumSq+=lastForces[i].x**2+lastForces[i].y**2; cnt++;
+
+  for (let k = 0; k < edges.length; k++) {
+    const edge = edges[k];
+    const a = verts[edge.i], b = verts[edge.j];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 0.001;
+    const eff = effectiveStiffness(edge, dx, dy);
+    const strain = (d - edge.restLength) / (edge.restLength || 0.001);
+    const fm = eff * strain * d;
+    const fx = (fm * dx) / d, fy = (fm * dy) / d;
+    forces[edge.i].x += fx; forces[edge.i].y += fy;
+    forces[edge.j].x -= fx; forces[edge.j].y -= fy;
   }
-  const forceNorm=cnt>0?Math.sqrt(sumSq/cnt):0;
-  return {verts,forceNorm};
+
+  if (Math.abs(pressure) > 0.001) {
+    let bVertsCount = 0, cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) {
+      if (verts[i].isBoundary) { cx += verts[i].x; cy += verts[i].y; bVertsCount++; }
+    }
+    if (bVertsCount > 0) { cx /= bVertsCount; cy /= bVertsCount; }
+    else {
+      for(let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; }
+      cx /= n; cy /= n;
+    }
+
+    for (let k = 0; k < boundaryEdgeIndices.length; k++) {
+      const edge = edges[boundaryEdgeIndices[k]];
+      const a = verts[edge.i], b = verts[edge.j];
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const edx = b.x - a.x, edy = b.y - a.y;
+      const len = Math.sqrt(edx * edx + edy * edy) || 0.001;
+      let nx = -edy / len, ny = edx / len;
+      if (nx * (cx - mx) + ny * (cy - my) > 0) { nx = -nx; ny = -ny; }
+      const pf = pressure * len * 0.5;
+      forces[edge.i].x += nx * pf; forces[edge.i].y += ny * pf;
+      forces[edge.j].x += nx * pf; forces[edge.j].y += ny * pf;
+    }
+  }
+
+  for (let k = 0; k < externalForces.length; k++) {
+    const ef = externalForces[k];
+    if (ef.vertexIndex < n) {
+      forces[ef.vertexIndex].x += ef.fx;
+      forces[ef.vertexIndex].y += ef.fy;
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (verts[i].pinned) { forces[i].x = 0; forces[i].y = 0; }
+  }
+}
+
+// Zero-allocation inner loop physics solver
+function simulateStep(vertices, edges, boundaryEdgeIndices, pressure, externalForces, cgState, alpha = 0.04) {
+  const verts = vertices.map(v => ({ ...v })); // Clone once per frame
+  const n = verts.length;
+
+  if (!cgState.prevForces || cgState.prevForces.length !== n) {
+    cgState.prevForces = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
+    cgState.searchDirections = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
+    cgState.currentForces = Array.from({ length: n }, () => ({ x: 0, y: 0 }));
+    cgState.isFirstStep = true;
+  }
+
+  const cgIterations = 6;
+
+  for (let iter = 0; iter < cgIterations; iter++) {
+    computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalForces, cgState.currentForces);
+
+    let dotNew = 0;
+    let dotOld = 0;
+
+    for (let i = 0; i < n; i++) {
+      if (verts[i].pinned) continue;
+      dotNew += cgState.currentForces[i].x * cgState.currentForces[i].x + cgState.currentForces[i].y * cgState.currentForces[i].y;
+      dotOld += cgState.prevForces[i].x * cgState.prevForces[i].x + cgState.prevForces[i].y * cgState.prevForces[i].y;
+    }
+
+    let beta = 0;
+    if (!cgState.isFirstStep && dotOld > 1e-10) {
+      beta = dotNew / dotOld;
+      if (beta > 1.5 || beta < 0) beta = 0;
+    }
+
+    for (let i = 0; i < n; i++) {
+      if (verts[i].pinned) {
+        cgState.searchDirections[i].x = 0;
+        cgState.searchDirections[i].y = 0;
+        continue;
+      }
+      cgState.searchDirections[i].x = cgState.currentForces[i].x + beta * cgState.searchDirections[i].x;
+      cgState.searchDirections[i].y = cgState.currentForces[i].y + beta * cgState.searchDirections[i].y;
+
+      verts[i].x += cgState.searchDirections[i].x * alpha;
+      verts[i].y += cgState.searchDirections[i].y * alpha;
+
+      cgState.prevForces[i].x = cgState.currentForces[i].x;
+      cgState.prevForces[i].y = cgState.currentForces[i].y;
+    }
+
+    cgState.isFirstStep = false;
+  }
+
+  let sumSq = 0, cnt = 0;
+  for (let i = 0; i < n; i++) {
+    if (verts[i].pinned) continue;
+    sumSq += cgState.currentForces[i].x ** 2 + cgState.currentForces[i].y ** 2; cnt++;
+  }
+  const forceNorm = cnt > 0 ? Math.sqrt(sumSq / cnt) : 0;
+
+  return { verts, forceNorm };
 }
 
 function computeEdgeStress(vertices,edges,restVertices) {
@@ -214,13 +266,13 @@ function dispColor(t) {
 }
 function buildDisplacementArrows(vertices,restVertices,spacing=45) {
   const arrows=[],cells={};
-  vertices.forEach((v,i)=>{
-    const r=restVertices[i]; if(!r) return;
+  for(let i=0; i<vertices.length; i++){
+    const v=vertices[i], r=restVertices[i]; if(!r) continue;
     const cx=Math.round(v.x/spacing),cy=Math.round(v.y/spacing),k=`${cx},${cy}`;
     if(!cells[k]) cells[k]={sumDx:0,sumDy:0,sumX:0,sumY:0,n:0};
     cells[k].sumDx+=v.x-r.x; cells[k].sumDy+=v.y-r.y;
     cells[k].sumX+=v.x; cells[k].sumY+=v.y; cells[k].n++;
-  });
+  }
   for(const c of Object.values(cells)){
     const n=c.n,dx=c.sumDx/n,dy=c.sumDy/n,mag=Math.sqrt(dx*dx+dy*dy);
     if(mag<0.5) continue;
@@ -258,25 +310,11 @@ function triFillColor(edges,tri){
   return `rgba(${Math.round(35+70*(1-t))},${Math.round(70+70*t)},${Math.round(25+35*(1-t))},0.4)`;
 }
 
-// Anisotropy colour: hue encodes angle (0-360°), brightness encodes how far from isotropic
 function anisoColor(angle, ratio) {
-  // ratio=1 => grey, ratio=0 => full saturation
   const hue = ((angle % Math.PI) / Math.PI * 360 + 360) % 360;
   const sat = Math.round(Math.min(Math.abs(1 - ratio) / 2, 1) * 90);
   const lig = 45;
   return `hsl(${Math.round(hue)},${sat}%,${lig}%)`;
-}
-function anisoTriFill(edges, tri) {
-  const getA = k => edges[k]?.aniso ?? {angle:0,ratio:1};
-  const a1=getA(tri.ea),a2=getA(tri.eb),a3=getA(tri.ec);
-  const avgRatio=(a1.ratio+a2.ratio+a3.ratio)/3;
-  // average angle (circular mean)
-  const sx=Math.cos(a1.angle*2)+Math.cos(a2.angle*2)+Math.cos(a3.angle*2);
-  const sy=Math.sin(a1.angle*2)+Math.sin(a2.angle*2)+Math.sin(a3.angle*2);
-  const avgAngle=Math.atan2(sy,sx)/2;
-  const sat=Math.round(Math.min(Math.abs(1-avgRatio)/2,1)*80);
-  const hue=((avgAngle%Math.PI)/Math.PI*360+360)%360;
-  return `hsla(${Math.round(hue)},${sat}%,45%,0.5)`;
 }
 
 const CANVAS_W=700,CANVAS_H=500;
@@ -314,17 +352,14 @@ const strongVal={color:"#fff",fontWeight:600};
 const sliderStyle={width:"100%",accentColor:COL.accent,marginTop:"4px"};
 const headingStyle={fontSize:"15px",fontWeight:700,color:"#fff",marginBottom:"10px",display:"flex",alignItems:"center",gap:"6px"};
 
-// Per-edge anisotropy direction vectors. Drawn dense — one per anisotropic edge,
-// length scaled to that edge's own length.
 function AnisotropyDirectionField({vertices, edges}) {
   return edges.map((ed,k) => {
     const a=vertices[ed.i],b=vertices[ed.j]; if(!a||!b) return null;
     const ratio = ed.aniso?.ratio ?? 1;
-    if(ratio>0.98) return null; // isotropic — nothing to show
+    if(ratio>0.98) return null;
     const angle = ed.aniso?.angle ?? 0;
-    const edgeLen = dist(a,b);
     const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
-    const arrowLen = edgeLen*0.7;
+    const arrowLen = dist(a,b)*0.7;
     const px=Math.cos(angle)*arrowLen/2, py=Math.sin(angle)*arrowLen/2;
     const degree=Math.min(Math.max(1-ratio,0),1);
     const [vr,vg,vb]=viridis(degree);
@@ -365,9 +400,11 @@ export default function PlantBiomechanicsSim() {
   const [pan,setPan]=useState({x:0,y:0});
   const [isPanning,setIsPanning]=useState(false);
   const panStart=useRef({x:0,y:0,panX:0,panY:0});
-  // Anisotropy brush state
-  const [anisoAngle,setAnisoAngle]=useState(0);       // preferred stiff axis in degrees
-  const [anisoRatio,setAnisoRatio]=useState(0.2);     // k_perp / k_parallel
+  
+  const cgStateRef = useRef({ prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true });
+
+  const [anisoAngle,setAnisoAngle]=useState(0);
+  const [anisoRatio,setAnisoRatio]=useState(0.2);
   const [showAnisoField,setShowAnisoField]=useState(true);
   const svgRef=useRef(null);
   const animRef=useRef(null);
@@ -393,11 +430,11 @@ export default function PlantBiomechanicsSim() {
   const maxVertexDisp=useMemo(()=>vertexDisp?Math.max(...vertexDisp,0.001):1,[vertexDisp]);
   const triStress=useMemo(()=>{
     if(!edgeStress) return null;
-    return trianglesWithEdges.map(t=>(edgeStress[t.ea]||0+edgeStress[t.eb]||0+edgeStress[t.ec]||0)/3);
+    return trianglesWithEdges.map(t=>(((edgeStress[t.ea]||0)+(edgeStress[t.eb]||0)+(edgeStress[t.ec]||0))/3));
   },[edgeStress,trianglesWithEdges]);
   const triDisp=useMemo(()=>{
     if(!vertexDisp) return null;
-    return trianglesWithEdges.map(t=>((vertexDisp[t.a]||0)+(vertexDisp[t.b]||0)+(vertexDisp[t.c]||0))/3);
+    return trianglesWithEdges.map(t=>(((vertexDisp[t.a]||0)+(vertexDisp[t.b]||0)+(vertexDisp[t.c]||0))/3));
   },[vertexDisp,trianglesWithEdges]);
   const dispArrows=useMemo(()=>{
     if(overlayMode!==OVERLAY_MODES.ARROWS||restVertices.length===0) return [];
@@ -414,28 +451,40 @@ export default function PlantBiomechanicsSim() {
   useEffect(()=>{modeRef.current=mode;},[mode]);
 
   useEffect(()=>{
-    if(!running){if(animRef.current)cancelAnimationFrame(animRef.current);return;}
+    if(!running){
+      if(animRef.current) cancelAnimationFrame(animRef.current);
+      cgStateRef.current = { prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true };
+      return;
+    }
     let frameId;
     const step=()=>{
       setVertices(prev=>{
         const eds=edgesRef.current;
-        const {verts:next,forceNorm}=simulateStep(prev,eds,boundaryEdgeIndices,pressure,externalForces);
-        const cx=next.reduce((s,v)=>s+v.x,0)/next.length;
-        const cy=next.reduce((s,v)=>s+v.y,0)/next.length;
-        const ox=CANVAS_W/2-cx,oy=CANVAS_H/2-cy;
-        const centred=next.map(v=>({...v,x:v.x+ox,y:v.y+oy}));
+        const {verts:next,forceNorm}=simulateStep(prev,eds,boundaryEdgeIndices,pressure,externalForces,cgStateRef.current);
+        
+        let cx=0, cy=0;
+        for (let i=0; i<next.length; i++) { cx += next[i].x; cy += next[i].y; }
+        cx /= next.length; cy /= next.length;
+        
+        // Mutate positions in-place to center, avoiding another array allocation (.map)
+        const ox=CANVAS_W/2-cx, oy=CANVAS_H/2-cy;
+        for (let i=0; i<next.length; i++) {
+          next[i].x += ox;
+          next[i].y += oy;
+        }
+        
         setForceNorm(forceNorm);
         if(modeRef.current===MODES.GROW){
           if(forceNorm<=growToleranceRef.current){
             setEdges(curEds=>curEds.map(ed=>{
-              const a=centred[ed.i],b=centred[ed.j]; if(!a||!b) return ed;
+              const a=next[ed.i],b=next[ed.j]; if(!a||!b) return ed;
               const cur=dist(a,b),delta=(cur-ed.restLength)*growRateRef.current;
               return {...ed,restLength:ed.restLength+delta};
             }));
             growCyclesRef.current+=1; setGrowCycles(growCyclesRef.current);
           }
         }
-        return centred;
+        return next;
       });
       frameId=requestAnimationFrame(step);
       animRef.current=frameId;
@@ -459,15 +508,17 @@ export default function PlantBiomechanicsSim() {
     if(postProcess){const r=postProcess(verts,eds);verts=r.vertices;eds=r.edges;}
     setVertices(verts);setRestVertices(verts.map(v=>({...v})));setEdges(eds);setTriangles(mesh.triangles);
     setNBoundary(mesh.nBoundary);setDrawPoints([]);setExternalForces([]);setRunning(false);
+    cgStateRef.current = { prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true };
     growCyclesRef.current=0;setGrowCycles(0);setMode(MODES.STIFFNESS);
   },[subdivMaxEdge]);
 
   const finishShape=useCallback(()=>{if(drawPoints.length>=3)initMesh(drawPoints);},[drawPoints,initMesh]);
   const loadPreset=useCallback((preset)=>initMesh(preset.fn(),preset.postProcess),[initMesh]);
-  const resetShape=useCallback(()=>{setVertices([]);setEdges([]);setTriangles([]);setRestVertices([]);setDrawPoints([]);setExternalForces([]);setPressure(0);setRunning(false);setNBoundary(0);growCyclesRef.current=0;setGrowCycles(0);setMode(MODES.DRAW);},[]);
+  const resetShape=useCallback(()=>{setVertices([]);setEdges([]);setTriangles([]);setRestVertices([]);setDrawPoints([]);setExternalForces([]);setPressure(0);setRunning(false);setNBoundary(0);growCyclesRef.current=0;setGrowCycles(0);cgStateRef.current = { prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true };setMode(MODES.DRAW);},[]);
   const resetDeformation=useCallback(()=>{
     if(restVertices.length===0) return;
     setRunning(false); growCyclesRef.current=0; setGrowCycles(0);
+    cgStateRef.current = { prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true };
     setVertices(restVertices.map(v=>({...v,vx:0,vy:0})));
     setEdges(prev=>prev.map(ed=>({...ed,restLength:dist(restVertices[ed.i],restVertices[ed.j])})));
   },[restVertices]);
@@ -500,8 +551,8 @@ export default function PlantBiomechanicsSim() {
     }
     else if(mode===MODES.STIFFNESS){setIsPainting(true);paintStiffness(pt);}
     else if(mode===MODES.ANISO){setIsPainting(true);paintAniso(pt);}
-    else if(mode===MODES.PIN){const vi=findNearestVertex(pt);if(vi>=0)setVertices(prev=>prev.map((v,k)=>k===vi?{...v,pinned:!v.pinned}:v));}
-    else if(mode===MODES.FORCE){const vi=findNearestVertex(pt);if(vi>=0)setExternalForces(prev=>{const ex=prev.findIndex(f=>f.vertexIndex===vi);if(ex>=0)return prev.filter((_,i)=>i!==ex);const fd=forceDir==="down"?{fx:0,fy:forceStrength}:forceDir==="up"?{fx:0,fy:-forceStrength}:forceDir==="left"?{fx:-forceStrength,fy:0}:{fx:forceStrength,fy:0};return[...prev,{vertexIndex:vi,...fd}];});}
+    else if(mode===MODES.PIN){const vi=findNearestVertex(pt);if(vi>=0)setVertices(prev=>prev.map((v,k)=>k===vi?{...v,pinned:!v.pinned}:v));cgStateRef.current.isFirstStep=true;}
+    else if(mode===MODES.FORCE){const vi=findNearestVertex(pt);if(vi>=0)setExternalForces(prev=>{const ex=prev.findIndex(f=>f.vertexIndex===vi);cgStateRef.current.isFirstStep=true;if(ex>=0)return prev.filter((_,i)=>i!==ex);const fd=forceDir==="down"?{fx:0,fy:forceStrength}:forceDir==="up"?{fx:0,fy:-forceStrength}:forceDir==="left"?{fx:-forceStrength,fy:0}:{fx:forceStrength,fy:0};return[...prev,{vertexIndex:vi,...fd}];});}
   },[mode,svgCoords,paintStiffness,paintAniso,findNearestVertex,forceStrength,forceDir,pan,snapToGrid]);
 
   const handleMouseMove=useCallback((e)=>{
@@ -566,7 +617,6 @@ export default function PlantBiomechanicsSim() {
   const isSimMode=mode===MODES.SIMULATE||mode===MODES.GROW;
   const isBrushMode=mode===MODES.STIFFNESS||mode===MODES.ANISO;
 
-  // Aniso brush direction indicator
   const anisoAngleRad=anisoAngle*(Math.PI/180);
   const brushTickLen=20;
 
@@ -576,10 +626,10 @@ export default function PlantBiomechanicsSim() {
 
       <div style={{textAlign:"center",marginBottom:"14px"}}>
         <h1 style={{fontSize:"24px",fontWeight:700,color:"#fff",margin:"0 0 4px 0",letterSpacing:"-0.5px"}}>
-          🌱 Plant Cell Biomechanics Lab
+          🌱 Plant Cell Biomechanics Lab (CG Solver)
         </h1>
         <p style={{fontSize:"14px",color:COL.textMuted,margin:0}}>
-          Draw · Paint stiffness & anisotropy · Apply turgor pressure · Visualise stress fields
+          Draw · Paint stiffness & anisotropy · Apply turgor pressure · Visualise static stress fields via Conjugate Gradient
         </p>
       </div>
 
@@ -623,7 +673,7 @@ export default function PlantBiomechanicsSim() {
               <div style={headingStyle}>🌿 Paint Stiffness</div>
               <label style={labelStyle}>Stiffness: <span style={{...strongVal,color:stiffnessLabelColor(brushStiffness)}}>{brushStiffness.toFixed(1)}</span></label>
               <input type="range" min="0.1" max="3" step="0.1" value={brushStiffness} onChange={e=>setBrushStiffness(parseFloat(e.target.value))} style={sliderStyle}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim}}><span>Soft</span><span>Stiff</span></div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim}}><span style={{color: '#440154'}}>Soft</span><span style={{color: '#fde725'}}>Stiff</span></div>
               <label style={{...labelStyle,marginTop:"12px"}}>Brush radius: <span style={strongVal}>{brushRadius}px</span></label>
               <input type="range" min="15" max="150" step="5" value={brushRadius} onChange={e=>setBrushRadius(parseInt(e.target.value))} style={sliderStyle}/>
               <button onClick={()=>setAllStiffness(brushStiffness)} style={{...smallBtn,width:"100%",marginTop:"10px"}}>Set All to {brushStiffness.toFixed(1)}</button>
@@ -636,7 +686,6 @@ export default function PlantBiomechanicsSim() {
               </p>
 
               <label style={labelStyle}>Preferred axis: <span style={strongVal}>{anisoAngle}°</span></label>
-              {/* Visual angle picker */}
               <div style={{position:"relative",width:"100%",marginBottom:"8px"}}>
                 <input type="range" min="0" max="179" step="1" value={anisoAngle}
                   onChange={e=>setAnisoAngle(parseInt(e.target.value))} style={sliderStyle}/>
@@ -644,18 +693,15 @@ export default function PlantBiomechanicsSim() {
                   <span>0° (→)</span><span>90° (↓)</span><span>179°</span>
                 </div>
               </div>
-              {/* Angle wheel preview */}
               <div style={{display:"flex",justifyContent:"center",marginBottom:"10px"}}>
                 <svg width="70" height="70" viewBox="-35 -35 70 70">
                   <circle r="30" fill="#1a2030" stroke="#3a4560" strokeWidth="1"/>
-                  {/* 4 compass ticks */}
                   {[0,45,90,135].map(a=>{
                     const ar=a*Math.PI/180,cos=Math.cos(ar),sin=Math.sin(ar);
                     return <line key={a} x1={cos*14} y1={sin*14} x2={cos*28} y2={sin*28}
                       stroke="#3a4560" strokeWidth="1" strokeLinecap="round"/>;
                   })}
-                  {/* Preferred axis */}
-                  {(()=>{
+                  {(() => {
                     const ar=anisoAngle*Math.PI/180;
                     const px=Math.cos(ar)*25,py=Math.sin(ar)*25;
                     const col=anisoColor(ar,anisoRatio);
@@ -699,21 +745,21 @@ export default function PlantBiomechanicsSim() {
               <label style={labelStyle}>Direction</label>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"5px",marginBottom:"12px"}}>
                 {[{k:"up",label:"↑ Up"},{k:"down",label:"↓ Down"},{k:"left",label:"← Left"},{k:"right",label:"→ Right"}].map(d=>(
-                  <button key={d.k} onClick={()=>{setForceDir(d.k);setExternalForces(prev=>prev.map(f=>{const fd=d.k==="down"?{fx:0,fy:forceStrength}:d.k==="up"?{fx:0,fy:-forceStrength}:d.k==="left"?{fx:-forceStrength,fy:0}:{fx:forceStrength,fy:0};return{...f,...fd};}));}} style={makeBtn(forceDir===d.k)}>{d.label}</button>
+                  <button key={d.k} onClick={()=>{setForceDir(d.k);setExternalForces(prev=>prev.map(f=>{const fd=d.k==="down"?{fx:0,fy:forceStrength}:d.k==="up"?{fx:0,fy:-forceStrength}:d.k==="left"?{fx:-forceStrength,fy:0}:{fx:forceStrength,fy:0};return{...f,...fd};}));cgStateRef.current.isFirstStep=true;}} style={makeBtn(forceDir===d.k)}>{d.label}</button>
                 ))}
               </div>
               <label style={labelStyle}>Strength: <span style={strongVal}>{forceStrength}</span></label>
-              <input type="range" min="5" max="80" step="5" value={forceStrength} onChange={e=>{const v=parseFloat(e.target.value);setForceStrength(v);setExternalForces(prev=>prev.map(f=>{const fd=forceDir==="down"?{fx:0,fy:v}:forceDir==="up"?{fx:0,fy:-v}:forceDir==="left"?{fx:-v,fy:0}:{fx:v,fy:0};return{...f,...fd};}));}} style={sliderStyle}/>
+              <input type="range" min="5" max="80" step="5" value={forceStrength} onChange={e=>{const v=parseFloat(e.target.value);setForceStrength(v);setExternalForces(prev=>prev.map(f=>{const fd=forceDir==="down"?{fx:0,fy:v}:forceDir==="up"?{fx:0,fy:-v}:forceDir==="left"?{fx:-v,fy:0}:{fx:v,fy:0};return{...f,...fd};}));cgStateRef.current.isFirstStep=true;}} style={sliderStyle}/>
             </>)}
 
             {mode===MODES.SIMULATE&&(<>
               <div style={headingStyle}>▶️ Simulate</div>
               <label style={labelStyle}>Turgor pressure: <span style={strongVal}>{pressure.toFixed(1)}</span></label>
-              <input type="range" min="-2" max="5" step="0.1" value={pressure} onChange={e=>setPressure(parseFloat(e.target.value))} style={sliderStyle}/>
+              <input type="range" min="-2" max="5" step="0.1" value={pressure} onChange={e=>{setPressure(parseFloat(e.target.value)); cgStateRef.current.isFirstStep=true;}} style={sliderStyle}/>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"12px"}}><span>Deflate</span><span>High turgor</span></div>
               <div style={{display:"flex",gap:"6px"}}>
                 <button onClick={()=>setRunning(r=>!r)} style={{...makeBtn(false,true),flex:1,fontWeight:600,textAlign:"center",background:running?"#3a2020":COL.accentGreen,borderColor:running?"#cc5555":COL.accentGreen,color:"#fff"}}>
-                  {running?"⏸ Pause":"▶ Run"}
+                  {running?"⏸ Pause":"▶ Run Solver"}
                 </button>
                 <button onClick={resetDeformation} style={smallBtn}>↺</button>
               </div>
@@ -733,17 +779,17 @@ export default function PlantBiomechanicsSim() {
             {mode===MODES.GROW&&(<>
               <div style={headingStyle}>🌱 Growth</div>
               <p style={{fontSize:"13px",lineHeight:1.6,color:COL.textMuted,margin:"0 0 12px 0"}}>
-                Runs dynamics until force norm falls below tolerance, then extends rest lengths.
+                Runs CG dynamics until residual norm falls below tolerance boundary, then incrementally mutates structural rest lengths.
               </p>
               <label style={labelStyle}>Step tolerance: <span style={strongVal}>{growTolerance.toFixed(2)}</span></label>
               <input type="range" min="0.01" max="20" step="0.01" value={growTolerance} onChange={e=>setGrowTolerance(parseFloat(e.target.value))} style={sliderStyle}/>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}><span>Near-equilibrium</span><span>Far</span></div>
-              <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"12px",lineHeight:1.5}}>RMS net force per free vertex.</div>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}><span>Equilibrium</span><span>Far</span></div>
+              <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"12px",lineHeight:1.5}}>RMS structural residual norm per node.</div>
               <label style={labelStyle}>Growth rate: <span style={strongVal}>{growRate.toFixed(3)}</span></label>
               <input type="range" min="0.001" max="0.5" step="0.001" value={growRate} onChange={e=>setGrowRate(parseFloat(e.target.value))} style={sliderStyle}/>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"14px"}}><span>Slow</span><span>Fast</span></div>
               <label style={labelStyle}>Turgor pressure: <span style={strongVal}>{pressure.toFixed(1)}</span></label>
-              <input type="range" min="-2" max="5" step="0.1" value={pressure} onChange={e=>setPressure(parseFloat(e.target.value))} style={sliderStyle}/>
+              <input type="range" min="-2" max="5" step="0.1" value={pressure} onChange={e=>{setPressure(parseFloat(e.target.value)); cgStateRef.current.isFirstStep=true;}} style={sliderStyle}/>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"14px"}}><span>Deflate</span><span>High</span></div>
               <div style={{display:"flex",gap:"6px"}}>
                 <button onClick={()=>setRunning(r=>!r)} style={{...makeBtn(false,true),flex:1,fontWeight:600,textAlign:"center",background:running?"#3a2020":COL.accentGreen,borderColor:running?"#cc5555":COL.accentGreen,color:"#fff"}}>
@@ -768,12 +814,8 @@ export default function PlantBiomechanicsSim() {
                 {Array.from({length:16},(_,i)=>{const [r,g,b]=viridis(i/15);return <div key={i} style={{flex:1,background:`rgb(${r},${g},${b})`}}/>;})}
               </div>
               <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"10px"}}><span>Soft</span><span>Stiff</span></div>
-              <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}>Vectors — anisotropy degree</div>
-              <div style={{display:"flex",height:"10px",borderRadius:"3px",overflow:"hidden",marginBottom:"3px"}}>
-                {Array.from({length:16},(_,i)=>{const [r,g,b]=viridis(i/15);return <div key={i} style={{flex:1,background:`rgb(${r},${g},${b})`}}/>;})}
-              </div>
-              <div style={{display:"flex",justifyContent:"space-between",fontSize:"11px",color:COL.textDim,marginBottom:"6px"}}><span>Isotropic</span><span>Max anisotropy</span></div>
-              <div style={{color:COL.textMuted,fontSize:"11px"}}>Vector length ∝ edge length</div>
+              <div style={{fontSize:"11px",color:COL.textDim,marginBottom:"4px"}}>Vectors — anisotropy direction</div>
+              <div style={{color:COL.textMuted,fontSize:"11px"}}>Vector length ∝ grid sizing</div>
             </>):(!isSimMode||overlayMode===OVERLAY_MODES.NONE)?(<>
               <div style={{display:"flex",height:"10px",borderRadius:"3px",overflow:"hidden",marginBottom:"3px"}}>
                 {Array.from({length:16},(_,i)=>{const [r,g,b]=viridis(i/15);return <div key={i} style={{flex:1,background:`rgb(${r},${g},${b})`}}/>;})}
@@ -799,7 +841,7 @@ export default function PlantBiomechanicsSim() {
         <div style={{border:`2px solid ${COL.panelBorder}`,borderRadius:"12px",overflow:"hidden",background:COL.canvasBg,flexShrink:0,position:"relative"}}>
           {isSimMode&&hasShape&&(
             <div style={{position:"absolute",bottom:"10px",left:"10px",zIndex:10,background:"rgba(0,0,0,0.5)",borderRadius:"6px",padding:"4px 8px",fontFamily:"monospace",fontSize:"11px",color:COL.textMuted}}>
-              Force norm: <span style={{color:"#fff",fontWeight:600}}>{forceNorm.toFixed(3)}</span>
+              Residual Norm: <span style={{color:"#fff",fontWeight:600}}>{forceNorm.toFixed(4)}</span>
             </div>
           )}
           <div style={{position:"absolute",bottom:"10px",right:"10px",zIndex:10,display:"flex",gap:"4px",alignItems:"center",background:"rgba(0,0,0,0.5)",borderRadius:"6px",padding:"3px 6px"}}>
@@ -828,15 +870,14 @@ export default function PlantBiomechanicsSim() {
               <path d={restBoundaryPath} fill="none" stroke="#444" strokeWidth="1" strokeDasharray="4 3" opacity="0.5"/>
             )}
 
-            {/* Triangles */}
             {trianglesWithEdges.map((t,k)=>{
               const a=vertices[t.a],b=vertices[t.b],c=vertices[t.c]; if(!a||!b||!c) return null;
               let fill;
               if(mode===MODES.ANISO){
                 fill=triFillColor(edges,t);
-              } else if(isSimMode&&overlayMode===OVERLAY_MODES.STRESS&&triStress){
+              } else if(isSimMode&&overlayMode===OVERLAY_MODES.STRESS&&triStress) {
                 fill=stressColor(Math.min((triStress[k]||0)/maxEdgeStress,1));
-              } else if(isSimMode&&(overlayMode===OVERLAY_MODES.DISP||overlayMode===OVERLAY_MODES.ARROWS)&&triDisp){
+              } else if(isSimMode&&(overlayMode===OVERLAY_MODES.DISP||overlayMode===OVERLAY_MODES.ARROWS)&&triDisp) {
                 fill=dispColor(Math.min((triDisp[k]||0)/maxVertexDisp,1));
               } else {
                 fill=triFillColor(edges,t);
@@ -844,7 +885,6 @@ export default function PlantBiomechanicsSim() {
               return <polygon key={`t${k}`} points={`${a.x},${a.y} ${b.x},${b.y} ${c.x},${c.y}`} fill={fill} stroke="none"/>;
             })}
 
-            {/* Edges */}
             {edges.map((ed,k)=>{
               const a=vertices[ed.i],b=vertices[ed.j]; if(!a||!b) return null;
               let stroke,strokeW;
@@ -861,12 +901,10 @@ export default function PlantBiomechanicsSim() {
               return <line key={`e${k}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={stroke} strokeWidth={strokeW} strokeLinecap="round"/>;
             })}
 
-            {/* Anisotropy direction field */}
             {mode===MODES.ANISO&&showAnisoField&&vertices.length>0&&(
               <AnisotropyDirectionField vertices={vertices} edges={edges}/>
             )}
 
-            {/* Displacement arrows overlay */}
             {overlayMode===OVERLAY_MODES.ARROWS&&dispArrows.map((arr,k)=>{
               const scale=Math.min(35/maxVertexDisp,4);
               const ex=arr.x+arr.dx*scale,ey=arr.y+arr.dy*scale;
@@ -875,7 +913,6 @@ export default function PlantBiomechanicsSim() {
                 stroke={dispColor(t)} strokeWidth="1.5" markerEnd="url(#arrowhead)" opacity="0.85"/>;
             })}
 
-            {/* Vertices */}
             {vertices.map((v,k)=>{
               const isHov=k===hoveredVertex,hasForce=externalForces.some(f=>f.vertexIndex===k);
               const r=v.pinned?5:isHov?5:v.isBoundary?3:1.5;
@@ -885,7 +922,6 @@ export default function PlantBiomechanicsSim() {
                 opacity={v.isBoundary||v.pinned||hasForce||isHov?1:0.4}/>;
             })}
 
-            {/* Force arrows */}
             {externalForces.map((ef,k)=>{
               const v=vertices[ef.vertexIndex]; if(!v) return null;
               const mag=Math.sqrt(ef.fx**2+ef.fy**2),arrowLen=Math.min(mag*0.8,40);
@@ -893,15 +929,13 @@ export default function PlantBiomechanicsSim() {
               return <line key={`f${k}`} x1={v.x} y1={v.y} x2={v.x+nx*arrowLen} y2={v.y+ny*arrowLen} stroke="#ff6060" strokeWidth="2.5" markerEnd="url(#arrowhead)"/>;
             })}
 
-            {/* Brush indicator */}
             {brushPos&&isBrushMode&&(
               <>
                 <circle cx={brushPos.x} cy={brushPos.y} r={brushRadius}
                   fill={mode===MODES.ANISO?`${anisoColor(anisoAngleRad,anisoRatio)}22`:`${stiffnessLabelColor(brushStiffness)}11`}
                   stroke={mode===MODES.ANISO?anisoColor(anisoAngleRad,anisoRatio):stiffnessLabelColor(brushStiffness)}
                   strokeWidth="1.5" strokeDasharray="5 3" opacity="0.8"/>
-                {/* Direction tick in aniso mode */}
-                {mode===MODES.ANISO&&(()=>{
+                {mode===MODES.ANISO&&(() => {
                   const px=Math.cos(anisoAngleRad)*brushTickLen,py=Math.sin(anisoAngleRad)*brushTickLen;
                   const col=anisoColor(anisoAngleRad,anisoRatio);
                   return <line x1={brushPos.x-px} y1={brushPos.y-py} x2={brushPos.x+px} y2={brushPos.y+py}
@@ -910,7 +944,6 @@ export default function PlantBiomechanicsSim() {
               </>
             )}
 
-            {/* Draw points */}
             {drawPoints.map((p,k)=>(<circle key={`dp${k}`} cx={p.x} cy={p.y} r="5" fill="#fff" stroke={COL.accent} strokeWidth="2"/>))}
             {drawPath&&<path d={drawPath} fill="none" stroke="#fff" strokeWidth="2" strokeDasharray="6 4"/>}
             {drawPoints.length>=3&&(
@@ -928,9 +961,8 @@ export default function PlantBiomechanicsSim() {
       </div>
 
       <div style={{textAlign:"center",marginTop:"14px",fontSize:"11px",color:COL.textDim,lineHeight:1.6}}>
-        Vertex-spring model · Delaunay mesh · Turgor pressure · Anisotropic stiffness · Stress & displacement field overlays
+        Vertex-spring system · Fletcher–Reeves Conjugate Gradient Solver · Anisotropic stiffness relaxation
       </div>
     </div>
   );
 }
-
