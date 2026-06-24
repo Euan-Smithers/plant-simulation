@@ -71,6 +71,15 @@ function generateInteriorPoints(boundary, spacing=22) {
   return pts;
 }
 function buildMesh(boundaryPts, subdivisionMaxEdge=0) {
+  const tolerance = 1e-3;
+  boundaryPts = boundaryPts.filter((p, idx) => {
+    if (idx === 0) return true;
+    return dist(p, boundaryPts[idx - 1]) > tolerance;
+    });
+   // Also check the closing edge between the last and first points
+   if (boundaryPts.length > 1 && dist(boundaryPts[boundaryPts.length - 1], boundaryPts[0]) <= tolerance) {
+    boundaryPts.pop();
+  }
   if(subdivisionMaxEdge>0) boundaryPts=subdivideBoundary(boundaryPts,subdivisionMaxEdge);
   const nBoundary=boundaryPts.length;
   const interiorSpacing=subdivisionMaxEdge>0?subdivisionMaxEdge*1.1:22;
@@ -858,10 +867,29 @@ export default function PlantBiomechanicsSim() {
           </div>
           <svg ref={svgRef} viewBox={viewBox} width={CANVAS_W} height={CANVAS_H}
             style={{display:"block",maxWidth:"100%",cursor:isPanning?"grabbing":isSimMode?"grab":isBrushMode?"none":mode===MODES.DRAW?"crosshair":"pointer"}}
-            onMouseDown={(e)=>{handleMiddleDown(e);if(e.button===0)handleMouseDown(e);}}
-            onMouseMove={handleMouseMove}
-            onMouseUp={(e)=>{handlePanUp(e);handleMouseUp(e);}}
-            onMouseLeave={handleMouseLeave}>
+             onMouseDown={(e)=>{handleMiddleDown(e);if(e.button===0)handleMouseDown(e);}}
+             onMouseMove={handleMouseMove}
+             onMouseUp={(e)=>{handlePanUp(e);handleMouseUp(e);}}
+           // onMouseDown={handleMouseDown}
+            //onMouseMove={handleMouseMove}
+           // onMouseUp={handleMouseUp}
+
+  //           onClick={(e) => {
+  //   if (hasShape) return;
+  //   const rect = e.currentTarget.getBoundingClientRect();
+  //   const x = e.clientX - rect.left;
+  //   const y = e.clientY - rect.top;
+
+  //   // --- ADD THIS CHECK HERE ---
+  //   // Checks if the click is within 5 pixels of any existing point
+  //   const isTooClose = drawPoints.some(p => dist(p, { x, y }) < 5);
+  //   if (isTooClose) return; // Exit early and do not add the point
+  //   // ----------------------------
+
+  //   setDrawPoints([...drawPoints, { x, y }]);
+  // }}
+            onMouseLeave={handleMouseLeave}
+            >
             <defs>
               <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
                 <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1a2030" strokeWidth="0.5"/>
