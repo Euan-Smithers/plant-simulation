@@ -419,6 +419,7 @@ export default function PlantBiomechanicsSim() {
   const [showAnisoField,setShowAnisoField]=useState(true);
   const svgRef=useRef(null);
   const animRef=useRef(null);
+  const fileInputRef = useRef(null); 
 
   const boundaryEdgeIndices=useMemo(()=>edges.reduce((a,e,i)=>{if(e.isBoundary)a.push(i);return a;},[]),[edges]);
   const ek=(a,b)=>a<b?`${a}-${b}`:`${b}-${a}`;
@@ -630,8 +631,73 @@ export default function PlantBiomechanicsSim() {
 
   const anisoAngleRad=anisoAngle*(Math.PI/180);
   const brushTickLen=20;
+  const saveSimulation = () => {
+    // Collect all elements defining the biomechanical layout
+    const simulationState = {
+      vertices,
+      edges,
+      triangles,
+      nBoundary,
+      restVertices,
+      pressure,
+      externalForces
+    };
 
+    // Serialize and trigger native browser file download
+    const blob = new Blob([JSON.stringify(simulationState, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.href = url;
+    downloadAnchor.download = `biomechanics_mesh_${Date.now()}.json`;
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    document.body.removeChild(downloadAnchor);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleLoadFileChange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const parsedData = JSON.parse(event.target.result);
+        
+        // Structure validation check
+        if (!parsedData.vertices || !parsedData.edges) {
+          alert("Error: Selected file is not a valid biomechanics layout file.");
+          return;
+        }
+
+        // Halt physics iterations and flush conjugate gradient history frames
+        setRunning(false);
+        cgStateRef.current = { prevForces: null, searchDirections: null, currentForces: null, isFirstStep: true };
+
+        // Rehydrate simulation arrays with custom settings intact
+        setVertices(parsedData.vertices);
+        setEdges(parsedData.edges);
+        setTriangles(parsedData.triangles || []);
+        setNBoundary(parsedData.nBoundary || 0);
+        setRestVertices(parsedData.restVertices || parsedData.vertices);
+        setPressure(parsedData.pressure || 0);
+        setExternalForces(parsedData.externalForces || []);
+        
+        // Clean out manual polygon path tracers
+        setDrawPoints([]);
+        
+        // Switch modes to evaluate and view right away
+        setMode(MODES.SIMULATE);
+        
+      } catch (err) {
+        alert("Failed to parse file. Ensure it is a valid simulation .json file.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = ""; // flush input so users can repeatedly refresh files
+  };
   return (
+
     <div style={{fontFamily:"'Inter', system-ui, -apple-system, sans-serif",background:COL.bg,color:COL.text,minHeight:"100vh",padding:"16px",boxSizing:"border-box"}}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');*{box-sizing:border-box;}input[type=range]{height:6px;}`}</style>
 
@@ -678,6 +744,38 @@ export default function PlantBiomechanicsSim() {
               <div style={{display:"flex",flexWrap:"wrap",gap:"5px"}}>
                 {PRESETS.map(p=>(<button key={p.label} onClick={()=>loadPreset(p)} style={{...smallBtn,flex:"1 0 45%"}}>{p.label}</button>))}
               </div>
+              {/* --- SAVE / LOAD DATA MANAGEMENT --- */}
+        <div style={{ ...panelStyle, marginTop: "12px" }}>
+          <div style={headingStyle}>
+            <span>💾 Storage & Mesh Transfer</span>
+          </div>
+          
+          <div style={{ display: "flex", gap: "8px" }}>
+            <button 
+              onClick={saveSimulation} 
+              style={makeBtn(false, vertices.length > 0)}
+              disabled={vertices.length === 0}
+            >
+              📤 Save Mesh
+            </button>
+            
+            <button 
+              onClick={() => fileInputRef.current?.click()} 
+              style={makeBtn(false, true)}
+            >
+              📥 Load Mesh
+            </button>
+          </div>
+
+          {/* Hidden upload proxy tracker element */}
+          <input 
+            type="file" 
+            ref={fileInputRef} 
+            onChange={handleLoadFileChange} 
+            accept=".json" 
+            style={{ display: "none" }} 
+          />
+        </div>
             </>)}
 
             {mode===MODES.STIFFNESS&&(<>
