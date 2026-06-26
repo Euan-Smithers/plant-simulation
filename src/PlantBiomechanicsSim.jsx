@@ -132,7 +132,7 @@ function effectiveStiffness(edge, ax, ay) {
   const dot=ex*px+ey*py;
   const cos2=dot*dot; // if parrellel will be 1, if perpendicular will be 0
   // return stiffness*(cos2 + ratio*(1-cos2));
-  return stiffness + stiffness*Math.abs((1-ratio)*(cos2)); // equivalent, but avoids multiplication by stiffness twice
+  return stiffness + 10*stiffness*Math.abs((1-ratio)*(cos2)); // equivalent, but avoids multiplication by stiffness twice
 }
 
 // Zero-allocation function. Mutates 'forces' in-place.
