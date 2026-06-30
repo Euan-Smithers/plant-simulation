@@ -72,54 +72,95 @@ function generateInteriorPoints(boundary, spacing=22) {
 }
 function buildMesh(boundaryPts, subdivisionMaxEdge=0) {
   const tolerance = 1e-3;
-  boundaryPts = boundaryPts.filter((p, idx) => {
+  let cleanPts = boundaryPts.filter((p, idx) => {
     if (idx === 0) return true;
     return dist(p, boundaryPts[idx - 1]) > tolerance;
-    });
-   // Also check the closing edge between the last and first points
-   if (boundaryPts.length > 1 && dist(boundaryPts[boundaryPts.length - 1], boundaryPts[0]) <= tolerance) {
-    boundaryPts.pop();
-  }
-  if(subdivisionMaxEdge>0) boundaryPts=subdivideBoundary(boundaryPts,subdivisionMaxEdge);
-  const nBoundary=boundaryPts.length;
-  const interiorSpacing=subdivisionMaxEdge>0?subdivisionMaxEdge*1.1:22;
-  const interior=generateInteriorPoints(boundaryPts,interiorSpacing);
-  const allPts=[...boundaryPts,...interior];
-  const verts=allPts.map((p,i)=>({x:p.x,y:p.y,vx:0,vy:0,pinned:false,isBoundary:i<nBoundary}));
-  const triangles=delaunayTriangulate(allPts);
+  });
   
-  const goodTris=triangles.filter(t=>{
+  // Also check the closing edge between the last and first points
+  if (cleanPts.length > 1 && dist(cleanPts[cleanPts.length - 1], cleanPts[0]) <= tolerance) {
+    cleanPts.pop();
+  }
+  if (subdivisionMaxEdge > 0) cleanPts = subdivideBoundary(cleanPts, subdivisionMaxEdge);
+
+  // Enforce counter-clockwise orientation of cleanPts in SVG coordinates (shoelace area < 0)
+  let area = 0;
+  for (let i = 0; i < cleanPts.length; i++) {
+    const p1 = cleanPts[i];
+    const p2 = cleanPts[(i + 1) % cleanPts.length];
+    area += p1.x * p2.y - p2.x * p1.y;
+  }
+  if (area > 0) {
+    // If area > 0, it is clockwise in SVG space; reverse it to make it counter-clockwise
+    cleanPts.reverse();
+  }
+
+  const nBoundary = cleanPts.length;
+  const interiorSpacing = subdivisionMaxEdge > 0 ? subdivisionMaxEdge * 1.1 : 22;
+  const interior = generateInteriorPoints(cleanPts, interiorSpacing);
+  const allPts = [...cleanPts, ...interior];
+  const verts = allPts.map((p, i) => ({ x: p.x, y: p.y, vx: 0, vy: 0, pinned: false, isBoundary: i < nBoundary }));
+  const triangles = delaunayTriangulate(allPts);
+  
+  const goodTris = triangles.filter(t => {
     const boundaryVerticesCount = (t.a < nBoundary ? 1 : 0) + (t.b < nBoundary ? 1 : 0) + (t.c < nBoundary ? 1 : 0);
     if (boundaryVerticesCount > 0 && boundaryVerticesCount < 3) return true;
-    const cx=(allPts[t.a].x+allPts[t.b].x+allPts[t.c].x)/3;
-    const cy=(allPts[t.a].y+allPts[t.b].y+allPts[t.c].y)/3;
-    return pointInPolygon(cx,cy,boundaryPts);
+    const cx = (allPts[t.a].x + allPts[t.b].x + allPts[t.c].x) / 3;
+    const cy = (allPts[t.a].y + allPts[t.b].y + allPts[t.c].y) / 3;
+    return pointInPolygon(cx, cy, cleanPts);
   });
 
-  const edgeSet=new Set(),ek=(a,b)=>a<b?`${a}-${b}`:`${b}-${a}`,edges=[];
-  const boundaryEdgeKeys=new Set();
-  for(let i=0;i<nBoundary;i++) boundaryEdgeKeys.add(ek(i,(i+1)%nBoundary));
-  const isBoundaryEdge=(a,b)=>a<nBoundary&&b<nBoundary&&boundaryEdgeKeys.has(ek(a,b));
-  for(let i=0; i<goodTris.length; i++){
-    const t=goodTris[i];
-    for(const [a,b] of [[t.a,t.b],[t.b,t.c],[t.c,t.a]]){
-      const k=ek(a,b);
-      if(!edgeSet.has(k)){
+  const edgeSet = new Set(), ek = (a, b) => a < b ? `${a}-${b}` : `${b}-${a}`, edges = [];
+  const boundaryEdgeKeys = new Set();
+  for (let i = 0; i < nBoundary; i++) boundaryEdgeKeys.add(ek(i, (i + 1) % nBoundary));
+  const isBoundaryEdge = (a, b) => a < nBoundary && b < nBoundary && boundaryEdgeKeys.has(ek(a, b));
+  
+  for (let i = 0; i < goodTris.length; i++) {
+    const t = goodTris[i];
+    for (const [a, b] of [[t.a, t.b], [t.b, t.c], [t.c, t.a]]) {
+      const k = ek(a, b);
+      if (!edgeSet.has(k)) {
         edgeSet.add(k);
-        edges.push({i:a,j:b,stiffness:1.0,restLength:dist(allPts[a],allPts[b]),
-          isBoundary:isBoundaryEdge(a,b),aniso:{angle:0,ratio:1.0}});
+        
+        let isBoundary = isBoundaryEdge(a, b);
+        let edgeI = a, edgeJ = b;
+        
+        // Pre-orient the boundary edge to follow the counter-clockwise loop
+        if (isBoundary) {
+          if (b === (a + 1) % nBoundary) {
+            edgeI = a; edgeJ = b;
+          } else if (a === (b + 1) % nBoundary) {
+            edgeI = b; edgeJ = a;
+          }
+        }
+
+        edges.push({
+          i: edgeI, 
+          j: edgeJ, 
+          stiffness: 1.0, 
+          restLength: dist(allPts[edgeI], allPts[edgeJ]),
+          isBoundary: isBoundary, 
+          aniso: { angle: 0, ratio: 1.0 }
+        });
       }
     }
   }
-  for(let i=0;i<nBoundary;i++){
-    const j=(i+1)%nBoundary,k=ek(i,j);
-    if(!edgeSet.has(k)){
+  
+  for (let i = 0; i < nBoundary; i++) {
+    const j = (i + 1) % nBoundary, k = ek(i, j);
+    if (!edgeSet.has(k)) {
       edgeSet.add(k);
-      edges.push({i,j,stiffness:1.0,restLength:dist(allPts[i],allPts[j]),
-        isBoundary:true,aniso:{angle:0,ratio:1.0}});
+      edges.push({
+        i, 
+        j, 
+        stiffness: 1.0, 
+        restLength: dist(allPts[i], allPts[j]),
+        isBoundary: true, 
+        aniso: { angle: 0, ratio: 1.0 }
+      });
     }
   }
-  return {vertices:verts,edges,triangles:goodTris,nBoundary};
+  return { vertices: verts, edges, triangles: goodTris, nBoundary };
 }
 
 function effectiveStiffness(edge, ax, ay) {
@@ -132,9 +173,10 @@ function effectiveStiffness(edge, ax, ay) {
   const dot=ex*px+ey*py;
   const cos2=dot*dot; // if parrellel will be 1, if perpendicular will be 0
   // return stiffness*(cos2 + ratio*(1-cos2));
-  return stiffness + 10*stiffness*Math.abs((1-ratio)*(cos2)); // equivalent, but avoids multiplication by stiffness twice
+  return stiffness + 5*stiffness*Math.abs((1-ratio)*(cos2)); // equivalent, but avoids multiplication by stiffness twice
 }
 
+// Zero-allocation function. Mutates 'forces' in-place.
 // Zero-allocation function. Mutates 'forces' in-place.
 function computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalForces, forces) {
   const n = verts.length;
@@ -142,6 +184,7 @@ function computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalF
     forces[i].x = 0; forces[i].y = 0;
   }
 
+  // 1. Spring forces & Anisotropy
   for (let k = 0; k < edges.length; k++) {
     const edge = edges[k];
     const a = verts[edge.i], b = verts[edge.j];
@@ -155,44 +198,40 @@ function computeNetForces(verts, edges, boundaryEdgeIndices, pressure, externalF
     forces[edge.j].x -= fx; forces[edge.j].y -= fy;
   }
 
+  // 2. Simplified Turgor Pressure Forces (Center-independent)
   if (Math.abs(pressure) > 0.001) {
-    let bVertsCount = 0, cx = 0, cy = 0;
-    for (let i = 0; i < n; i++) {
-      if (verts[i].isBoundary) { cx += verts[i].x; cy += verts[i].y; bVertsCount++; }
-    }
-    if (bVertsCount > 0) { cx /= bVertsCount; cy /= bVertsCount; }
-    else {
-      for(let i = 0; i < n; i++) { cx += verts[i].x; cy += verts[i].y; }
-      cx /= n; cy /= n;
-    }
-
     for (let k = 0; k < boundaryEdgeIndices.length; k++) {
       const edge = edges[boundaryEdgeIndices[k]];
       const a = verts[edge.i], b = verts[edge.j];
-      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
       const edx = b.x - a.x, edy = b.y - a.y;
       const len = Math.sqrt(edx * edx + edy * edy) || 0.001;
-      let nx = -edy / len, ny = edx / len;
-      if (nx * (cx - mx) + ny * (cy - my) > 0) { nx = -nx; ny = -ny; }
+      
+      // Because boundary edges are guaranteed to be pre-oriented counter-clockwise,
+      // the normal (-edy, edx) always points outward in SVG screen coordinates.
+      const nx = -edy / len;
+      const ny = edx / len;
+      
       const pf = pressure * len * 0.5;
       forces[edge.i].x += nx * pf; forces[edge.i].y += ny * pf;
       forces[edge.j].x += nx * pf; forces[edge.j].y += ny * pf;
     }
   }
 
+  // 3. External forces
   for (let k = 0; k < externalForces.length; k++) {
     const ef = externalForces[k];
     if (ef.vertexIndex < n) {
-      forces[ef.vertexIndex].x += ef.fx;
-      forces[ef.vertexIndex].y += ef.fy;
+      forces[ef.vertexIndex].x += ef.fx; forces[ef.vertexIndex].y += ef.fy;
     }
   }
 
+  // 4. Pin constraints
   for (let i = 0; i < n; i++) {
-    if (verts[i].pinned) { forces[i].x = 0; forces[i].y = 0; }
+    if (verts[i].pinned) {
+      forces[i].x = 0; forces[i].y = 0;
+    }
   }
 }
-
 // Zero-allocation inner loop physics solver
 function simulateStep(vertices, edges, boundaryEdgeIndices, pressure, externalForces, cgState, alpha = 0.04) {
   const verts = vertices.map(v => ({ ...v })); // Clone once per frame
